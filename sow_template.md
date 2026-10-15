@@ -32,43 +32,49 @@
 
 ### 2.1 Message Transport & Serialization Format
 - **Transport Protocol:** TCP
-- **Serialization Format:** [JSON / Fixed-Header Binary / Delimited Text]
-- **Framing Rule Requirement:** Explicitly define the boundary delimitation rule (e.g., newline `\n` delimiter or 4-byte big-endian length prefix) to handle TCP byte stream boundary processing. Provide raw wire stream examples and formal schema specifications for your chosen format.
-
-#### Framing Examples:
-- **Option A (Newline-Delimited JSON):**
-  - *Wire Stream Example:* `{"msg_type":"CONNECT","player_id":"Alice","timestamp":1727000000}\n{"msg_type":"MOVE","player_id":"Alice","payload":{"row":0,"col":2},"timestamp":1727000005}\n`
-  - *JSON Schema Definition:*
-    ```json
-    {
-      "msg_type": "MOVE",
-      "player_id": "Player_1",
-      "payload": {
-        "row": 0,
-        "col": 2
-      },
-      "timestamp": 1727000000
-    }
-    ```
-- **Option B (Text-Delimited Protocol):**
-  - *Wire Stream Example:* `CONNECT|Alice|1727000000\nMOVE|Alice|0,2|1727000005\n`
-  - *Grammar / Schema Definition:* `MOVE|<PLAYER_ID>|<ROW>,<COL>|<TIMESTAMP>\n`
+- **Serialization Format:** Structured JSON
+- **Framing Rule Requirement:** Every JSON object is UTF-8 encoded and terminated by a newline character \n (0x0A). The receiver accumulates incoming bytes into a stream buffer until a \n is encountered, extracts the complete line, and deserializes the JSON object. Any bytes after the last \n remain in buffer until the rest of the message is received. 
+- *Wire Stream Example:* `{"msg_type":"CONNECT","player_id":"UNASSIGNED","payload":{"alias":"Edgar"},"timestamp":1920000000}\n{"msg_type":"SHOT","player_id":"Player_1","payload":{"row":"E","col":7},"timestamp":1920000005}\n`
+- *JSON Schema Definition (SHOT):*
+```json
+  {
+    "msg_type": "SHOT",
+    "player_id": "Player_1",
+    "payload": {
+      "row": "E",
+      "col": 7
+    },
+    "timestamp": 1920000005
+  }
+```
+- `msg_type`: a string naming the message type.
+- `player_id`: an identifier or the player, if they are assigned player 1 or 2, or unassigned if they have not started a game yet. 
+- `row`: string, Letter A-J.
+- `col`: Integer, 1-10.
+- `timestamp`: an integer Unix time.
+- `payload`: object whose field depends on msg_type.
 
 ### 2.2 Message Schema Definitions
 
 #### Message Types:
 1. `CONNECT` (Client -> Server): Request to join the game room.
-2. `LOBBY_WAIT` (Server -> Client): Notification that server is waiting for Player 2.
-3. `GAME_START` (Server -> Clients): Game initiated, assigns roles (e.g. Player X vs Player O).
-4. `MOVE` (Client -> Server): Player action (e.g., cell coordinates or answer choice).
-5. `STATE_UPDATE` (Server -> Clients): Broadcast current game board / state and active player turn.
-6. `GAME_OVER` (Server -> Clients): Victory / Draw notification with final scores.
-7. `ERROR` (Server -> Client): Invalid move or malformed packet error.
+2. `DISCONNECT` (Client -> Server): Notice of leaving the game room.
+3. `LOBBY_WAIT` (Server -> Client): Notification that server is waiting for Player 2.
+4. `GAME_START` (Server -> Clients): Game initiated, assigns roles Player 1 or Player 2.
+5. `SHOT` (Client -> Server): Player action, provide target coordinates to shoot at.
+6. `STATE_UPDATE` (Server -> Clients): Alerts if there is a HIT, MISS, or SUNK SHIP after the shot, and remaining target cells count left, then whose turn is next.
+7. `GAME_OVER` (Server -> Clients): Victory, declaration of winner, announcement of shot limit tie, draw, forfeit, with final hit counts.
+8. `ERROR` (Server -> Client): Invalid shot or malformed packet error, an unaccepted placement, actions taken outside of turn.
+9. `DRAW_OFFER` (Client -> Server, relays to opponent): Player asks for a draw.
+10. `DRAW_RESPONSE` (Client -> Server, relayed to offering player): Accept or deny the draw.
+11. `PLACE_SHIPS` (Client -> Server): Player places ships, or selects a random placement.
+12. `PLACEMENT_ACK` (Server -> Client): Confirms layout for players, displays ship placements for selected ships and random placement.
 
 ---
 
 ### 2.3 Game State Machine (FSM) Design (Sprint 1 Deliverable)
-- **State Transitions:** Detail state flow: `INIT` -> `WAITING_FOR_PLAYERS` -> `PLAYER_TURN` -> `EVALUATE_MOVE` -> `CHECK_WIN_DRAW` -> `GAME_OVER` -> `CLEANUP`.
+- **State Transitions:** Detail state flow: `INIT` -> `WAITING_FOR_PLAYERS` -> `GAME_START` -> `SHIP_PLACEMENT` -> `PLAYER_TURN` -> `EVALUATE_MOVE` -> `CHECK_WIN_DRAW` -> `DRAW_PENDING` -> `GAME_OVER` -> `CLEANUP`.
+<img width="2767" height="4130" alt="Game Session Lifecycle Flow-2026-10-15-051522" src="https://github.com/user-attachments/assets/28783916-860a-405a-9857-6133bd63ebb0" />
 
 ---
 
