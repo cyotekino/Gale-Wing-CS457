@@ -74,7 +74,7 @@
 
 ### 2.3 Game State Machine (FSM) Design (Sprint 1 Deliverable)
 - **State Transitions:**
-- stateDiagram-v2
+  stateDiagram-v2
   direction TB
   [*] --> INIT
   INIT --> WAITING_FOR_PLAYERS : server listening
