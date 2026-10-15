@@ -1,9 +1,9 @@
 # CS 457 Project Statement of Work (SOW) & Protocol Specification Template
 
-**Student Name:** [Your Full Name]  
-**Date:** [YYYY-MM-DD]  
+**Student Name:** Gale Wing  
+**Date:** 2026-10-14
 **Course:** CS 457 - Computer Networks  
-**Target Server Domain:** `server.[yourlastname].edu`  
+**Target Server Domain:** `server.wing.edu`  
 
 ---
 
@@ -17,14 +17,14 @@
 > - You are encouraged to use python, but I'm not going to make it a strict requirement. The instructor and TA's ability to help with C or Rust, etc will be diminished in other languages.
 
 ### 1.1 Game Overview
-- **Chosen Game:** [e.g., Terminal Trivia, Tic-Tac-Toe, Connect Four, Battleship]
+- **Chosen Game:** Battleship
 - **Player Capacity:** 2 Players (Simulated via 2 CML Client nodes)
-- **Game Summary:** [Briefly describe the gameplay mechanics and rules]
+- **Game Summary:** Each player has a 10x10 board that only they can see. Each player has 5 ships that they place on their board either vertically or horizontally, and they cannot overlap. The rows of the board are A-J and columns 1-10, with a Carrier ship taking 5 slots, a Battleship takes 4, a Cruiser takes 3, a submarine takes 3, and a Destroyer ship takes 2 slots. Players alternate taking turns firing a single shot at a coordinate attempting to hit a slot on a ship, either getting a hit or miss in response. Once all slots on a ship have been hit, the ship sinks, if all 17 slots are eventually hit, that player loses. 
 
 ### 1.2 Core Game Rules & Win/Draw Conditions
-- **Turn Mechanics:** [Explain how turn order is enforced between Player 1 and Player 2]
-- **Victory Condition:** [Define how a player wins the game]
-- **Draw/Tie Condition:** [Define how a draw/tie is detected and handled]
+- **Turn Mechanics:** The first client who connects will be player one, while the second becomes player 2. Each will be assigned them when the game starts, each player will receive their layout and their five ships, with the option to place their ships or have them randomly assigned. Player 1 will fire first, with one shot per turn, after the shot is launched, it will switch to the next player. Additional actions taken by a player outside of their turn will be rejected. 
+- **Victory Condition:** [Define how a player wins the game] Once all 17 ship slots are hit, the server will send a game over alert with the winner displayed to both clients, if a player disconnects then the other player will with by forfeit. 
+- **Draw/Tie Condition:** A 50 shot limit will be implemented, if all shots are exhausted and both players still have standing ships, the person with the most hits landed on ships wins, otherwise if it is even a tie will be called. For a draw, players can submit a draw request that the other player will receive, with an accept or deny option. 
 
 ---
 
