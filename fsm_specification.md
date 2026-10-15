@@ -1,4 +1,5 @@
-  stateDiagram-v2
+```mermaid
+stateDiagram-v2
   direction TB
   [*] --> INIT
   INIT --> WAITING_FOR_PLAYERS : server listening
@@ -23,3 +24,4 @@
   PLAYER_TURN --> DRAW_PENDING
   CLEANUP --> WAITING_FOR_PLAYERS : New game
   CLEANUP --> [*] 
+```
