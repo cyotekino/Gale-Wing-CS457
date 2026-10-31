@@ -81,13 +81,13 @@
 ## 3. Game Behavior & Server Concurrency Architecture (Sprint 2 Deliverable)
 
 ### 3.1 Server Concurrency Strategy
-- **Architecture Choice:** [Multi-Threading (`threading.Thread`) OR Non-blocking I/O multiplexing (`select.select` / `selectors`)]
-- **Synchronization Logic:** Explain how shared game state and client list are thread-safe (e.g. `threading.Lock`) to prevent race conditions during turn processing.
+- **Architecture Choice:** Non-blocking I/O multiplexing with selectors.
+- **Synchronization Logic:** All game states are owned by the event-loop thread, so each message handler will run to completion before the next event is processed. This way the two players' messages with not overlap and eliminates the need for locks. 
 
 ### 3.2 State & Score Synchronization Across Clients
-- **Turn Enforcement:** Detail how the server validates active player ID before processing moves and broadcasts updated turn notifications to all clients.
-- **Score & Board Synchronization:** Describe how state broadcasts keep client screens synchronized in real time.
-- **Mermaid Sequence Diagram:** Embed a sequence diagram authored strictly in **Mermaid (`sequenceDiagram`) syntax** illustrating client move submission, server authority validation, board mutation, and synchronized state broadcast to all clients.
+- **Turn Enforcement:**Every SHOT is checked in the order taken for: FSM state, sender identity (from connection), active turn, coordinate range, and check for repeated cells. Any failures return an ERROR to the sender and no state change will occur. 
+- **Score & Board Synchronization:** After a valid shot is received, the server queues a STATE_UPDATE to both clients in a handler call. GAME_OVER carries the final hit counts and leaderboard in the same way, but ship locations will never be broadcasted. 
+- **Mermaid Sequence Diagram:** Embed a sequence diagram authored strictly in **Mermaid (`sequenceDiagram`) syntax** In concurrency_design.md
 
 ---
 
