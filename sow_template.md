@@ -87,7 +87,7 @@
 ### 3.2 State & Score Synchronization Across Clients
 - **Turn Enforcement:**Every SHOT is checked in the order taken for: FSM state, sender identity (from connection), active turn, coordinate range, and check for repeated cells. Any failures return an ERROR to the sender and no state change will occur. 
 - **Score & Board Synchronization:** After a valid shot is received, the server queues a STATE_UPDATE to both clients in a handler call. GAME_OVER carries the final hit counts and leaderboard in the same way, but ship locations will never be broadcasted. 
-- **Mermaid Sequence Diagram:** Embed a sequence diagram authored strictly in **Mermaid (`sequenceDiagram`) syntax** In concurrency_design.md
+- **Mermaid Sequence Diagram:** In concurrency_design.md
 
 ---
 
