@@ -7,6 +7,7 @@
 This document explains sprint 2 requirements regarding how the Battleship server handles two simultaneous client connections, enforces turns, keeps game state consistent, and broadcasts state and score updates to both players.
 
 The server uses non-blocking I/O multiplexing with Python's `selectors` module. All sockets are serviced by one event loop running in a single thread. There are no worker threads, so all game state is owned by that one thread.
+
 ---
 
 ## 2. Server Concurrency Architecture & Connection Lifecycle
