@@ -2,7 +2,8 @@ import argparse
 import selectors
 import socket
 import sys
-from protocol import extract_lines, parse_message
+from protocol import extract_lines, parse_message, encode_message, build_message
+
 
 class ClientConn:
     """Per-connection state for one client socket."""
@@ -16,6 +17,7 @@ class ClientConn:
         self.alias = None
         self.closed = False
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Battleship game server")
     parser.add_argument(
@@ -26,6 +28,7 @@ def parse_args():
         parser.error(f"port {args.port} is out of range: use 1024-65535")
     return args
 
+
 def create_listener(port):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -34,12 +37,14 @@ def create_listener(port):
     sock.setblocking(False)
     return sock
 
+
 def accept_client(sel, listen_sock):
     client_sock, addr = listen_sock.accept()
     client_sock.setblocking(False)
     conn = ClientConn(client_sock, addr)
     sel.register(client_sock, selectors.EVENT_READ, data=conn)
     print(f"[SERVER] Connection from {addr[0]}:{addr[1]}")
+
 
 def teardown(sel, conn):
     """Unregister and close a client connection (safe to call twice)."""
@@ -49,6 +54,7 @@ def teardown(sel, conn):
     conn.sock.close()
     conn.closed = True
     print(f"[SERVER] {conn.addr[0]}:{conn.addr[1]} disconnected")
+
 
 def handle_read(sel, conn):
     """Receive data, detect EOF/errors, and process complete messages."""
@@ -69,6 +75,30 @@ def handle_read(sel, conn):
             print(f"[SERVER] Malformed message from {conn.addr[0]}:{conn.addr[1]}")
         else:
             print(f"[SERVER] Received from {conn.addr[0]}:{conn.addr[1]}: {msg}")
+            queue_message(sel, conn, build_message("LOBBY_WAIT", "SERVER", {"message": "echo test"}))
+
+
+def queue_message(sel, conn, msg):
+    """Add a message to conn's send buffer and enable write events."""
+    if conn.closed:
+        return
+    conn.outbuf += encode_message(msg)
+    sel.modify(conn.sock, selectors.EVENT_READ | selectors.EVENT_WRITE, data=conn)
+
+
+def handle_write(sel, conn):
+    """Send as much of conn's buffer as the socket accepts; keep the rest."""
+    try:
+        sent = conn.sock.send(conn.outbuf)
+    except BlockingIOError:
+        return
+    except OSError:
+        teardown(sel, conn)
+        return
+    del conn.outbuf[:sent]
+    if not conn.outbuf:
+        sel.modify(conn.sock, selectors.EVENT_READ, data=conn)
+
 
 def main():
     args = parse_args()
@@ -95,11 +125,14 @@ def main():
                         continue
                     if mask & selectors.EVENT_READ:
                         handle_read(sel, conn)
+                    if mask & selectors.EVENT_WRITE and not conn.closed:
+                        handle_write(sel, conn)
     except KeyboardInterrupt:
         print("\n[SERVER] Shutting down")
     finally:
         sel.close()
         listen_sock.close()
+
 
 if __name__ == "__main__":
     main()
