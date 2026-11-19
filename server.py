@@ -23,6 +23,7 @@ class ClientConn:
         self.player_id = "UNASSIGNED"
         self.alias = None
         self.closed = False
+        self.close_after_send = False
 
 
 class GameSession:
@@ -46,6 +47,7 @@ class GameSession:
 
 
 def parse_args():
+    """Parse and validate command-line arguments."""
     parser = argparse.ArgumentParser(description="Battleship game server")
     parser.add_argument(
         "-p", "--port", type=int, required=True, help="TCP port to listen on (1024-65535)"
@@ -57,6 +59,7 @@ def parse_args():
 
 
 def create_listener(port):
+    """Create a non-blocking TCP socket listening on 0.0.0.0:port."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("0.0.0.0", port))
@@ -66,6 +69,7 @@ def create_listener(port):
 
 
 def accept_client(sel, listen_sock):
+    """Accept a new client and register it with the selector."""
     client_sock, addr = listen_sock.accept()
     client_sock.setblocking(False)
     conn = ClientConn(client_sock, addr)
@@ -125,11 +129,13 @@ def handle_write(sel, conn):
     del conn.outbuf[:sent]
     if not conn.outbuf:
         sel.modify(conn.sock, selectors.EVENT_READ, data=conn)
+        if conn.close_after_send:
+            teardown(sel, conn)
 
 
-def send_error(sel, conn, code, test, ref_msg_type):
+def send_error(sel, conn, code, text, ref_msg_type):
     """Queue an ERROR message to one client."""
-    payload = {"code": code, "message": test, "ref_msg_type": ref_msg_type}
+    payload = {"code": code, "message": text, "ref_msg_type": ref_msg_type}
     queue_message(sel, conn, build_message("ERROR", "SERVER", payload))
 
 
@@ -147,10 +153,60 @@ def dispatch(sel, conn, session, msg):
         return
     HANDLERS[msg_type](sel, conn, session, msg["payload"])
 
-HANDLERS = {}
+
+def handle_connect(sel, conn, session, payload):
+    """Seat a new player, or reject the connection if the game is full."""
+    if conn.player_id != "UNASSIGNED":
+        send_error(sel, conn, "INVALID_STATE", "Player is already seated", "CONNECT")
+        return
+    
+    alias = payload.get("alias")
+    if not isinstance(alias, str) or not 1 <= len(alias) <= 16:
+        send_error(sel, conn, "MALFORMED_MESSAGE", "alias must be a 1-16 character string", "CONNECT")
+        return
+    if session.state != "WAITING_FOR_PLAYERS" or len(session.players) >= 2:
+        send_error(sel, conn, "GAME_FULL", "Game can only take a maximum of two players, please wait for the next game", "CONNECT")
+        conn.close_after_send = True
+        return
+
+    player_id = "Player_1" if "Player_1" not in session.players else "Player_2"
+    conn.player_id = player_id
+    conn.alias = alias
+    session.players[player_id] = conn
+    print(f"[SERVER] {alias} seated as {player_id}")
+
+    if len(session.players) == 1:
+        payload = {
+            "assigned_player_id": player_id, 
+            "players_connected": 1, 
+            "message": "Waiting for Player 2 to join",
+        }
+        queue_message(sel, conn, build_message("LOBBY_WAIT", "SERVER", payload))
+        return
+    session.state = "GAME_START"
+    fleet = [{"name": name, "length": length} for name, length in FLEET.items()]
+    for pid in PLAYER_IDS:
+        opponent_id = "Player_2" if pid == "Player_1" else "Player_1"
+        payload = {
+            "your_player_id": pid,
+            "opponent_alias": session.players[opponent_id].alias,
+            "first_turn": "Player_1",
+            "board_size": 10,
+            "shot_limit": SHOT_LIMIT,
+            "fleet": fleet,
+        }
+        queue_message(sel, session.players[pid], build_message("GAME_START", "SERVER", payload))
+    session.state = "SHIP_PLACEMENT"
+    print("[SERVER] Both players seated, starting ship placement")
+
+
+HANDLERS = {
+    "CONNECT": handle_connect,
+}
 
 
 def main():
+    """Entry point for the Battleship server."""
     args = parse_args()
 
     try:
