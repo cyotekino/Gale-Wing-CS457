@@ -2,6 +2,7 @@ import argparse
 import selectors
 import socket
 import sys
+import random
 from protocol import extract_lines, parse_message, encode_message, build_message
 
 
@@ -77,7 +78,7 @@ def accept_client(sel, listen_sock):
     print(f"[SERVER] Connection from {addr[0]}:{addr[1]}")
 
 
-def teardown(sel, conn):
+def teardown(sel, conn, session):
     """Unregister and close a client connection (safe to call twice)."""
     if conn.closed:
         return
@@ -85,6 +86,13 @@ def teardown(sel, conn):
     conn.sock.close()
     conn.closed = True
     print(f"[SERVER] {conn.addr[0]}:{conn.addr[1]} disconnected")
+    pid = conn.player_id
+    if session.players.get(pid) is not conn:
+        return
+    if session.state in ("SHIP_PLACEMENT", "PLAYER_TURN", "DRAW_PENDING"):
+        end_game(sel, session, "FORFEIT", opponent(pid))
+    else:
+        del session.players[pid]
 
 
 def handle_read(sel, conn, session):
@@ -94,13 +102,15 @@ def handle_read(sel, conn, session):
     except BlockingIOError:
         return
     except OSError:
-        teardown(sel, conn)
+        teardown(sel, conn, session)
         return
     if not data:
-        teardown(sel, conn)
+        teardown(sel, conn, session)
         return
     conn.inbuf += data
     for line in extract_lines(conn.inbuf):
+        if conn.closed:
+            break
         msg = parse_message(line)
         if msg is None:
             send_error(sel, conn, "MALFORMED_MESSAGE", "Could not parse message", None)
@@ -117,7 +127,7 @@ def queue_message(sel, conn, msg):
     sel.modify(conn.sock, selectors.EVENT_READ | selectors.EVENT_WRITE, data=conn)
 
 
-def handle_write(sel, conn):
+def handle_write(sel, conn, session):
     """Send as much of conn's buffer as the socket accepts; keep the rest."""
     try:
         sent = conn.sock.send(conn.outbuf)
@@ -130,7 +140,7 @@ def handle_write(sel, conn):
     if not conn.outbuf:
         sel.modify(conn.sock, selectors.EVENT_READ, data=conn)
         if conn.close_after_send:
-            teardown(sel, conn)
+            teardown(sel, conn, session)
 
 
 def send_error(sel, conn, code, text, ref_msg_type):
@@ -200,8 +210,253 @@ def handle_connect(sel, conn, session, payload):
     print("[SERVER] Both players seated, starting ship placement")
 
 
+def opponent(pid):
+    """Return the other player's ID."""
+
+    return "Player_2" if pid == "Player_1" else "Player_1"
+
+
+def broadcast(sel, session, msg_type, payload):
+    """Queue the same server message to every seated player."""
+    msg = build_message(msg_type, "SERVER", payload)
+    for conn in session.players.values():
+        queue_message(sel, conn, msg)
+
+
+def score_table(session):
+    """Build the per-player hits, shots fired, and cells remaining."""
+    return {
+        pid: {
+            "hits": session.hits[pid],
+            "shots_fired": session.shots_fired[pid],
+            "cells_remaining": TOTAL_SHIP_CELLS - session.hits[opponent(pid)],
+        }
+        for pid in PLAYER_IDS
+    }
+
+
+def ship_cells(row, col, length, orientation):
+    """Return the set of cells a ship covers, or None if it leaves the board."""
+    if not isinstance(row, str) or len(row) != 1 or row not in ROWS:
+        return None
+    if not isinstance(col, int) or isinstance(col, bool) or not 1 <= col <= 10:
+        return None
+    if orientation not in ("H", "V"):
+        return None
+    start = ROWS.index(row)
+    if orientation == "H":
+        if col + length - 1 > 10:
+            return None
+        return {(row, col + i) for i in range(length)}
+    if start + length > len(ROWS):
+        return None
+    return {(ROWS[start + i], col) for i in range(length)}
+
+
+def validate_layout(ships):
+    """Check a manual fleet layout and return {ship_name: cells}, or None if invalid."""
+    if not isinstance(ships, list) or len(ships) != len(FLEET):
+        return None
+    fleet = {}
+    occupied = set()
+    for ship in ships:
+        if not isinstance(ship, dict):
+            return None
+        name = ship.get("name")
+        if not isinstance(name, str) or name not in FLEET or name in fleet:
+            return None
+        cells = ship_cells(ship.get("row"), ship.get("col"), FLEET[name], ship.get("orientation"))
+        if cells is None or cells & occupied:
+            return None
+        fleet[name] = cells
+        occupied |= cells
+    return fleet
+
+
+def random_layout():
+    """Place all five ships randomly with no overlaps; return (fleet, ships)."""
+    fleet = {}
+    ships = []
+    occupied = set()
+    for name, length in FLEET.items():
+        while True:
+            row = random.choice(ROWS)
+            col = random.randint(1, 10)
+            orientation = random.choice("HV")
+            cells = ship_cells(row, col, length, orientation)
+            if cells and not cells & occupied:
+                break
+        fleet[name] = cells
+        occupied |= cells
+        ships.append({"name": name, "row": row, "col": col, "orientation": orientation})
+    return fleet, ships
+
+
+def end_game(sel, session, reason, winner):
+    """Update the leaderboard, broadcast GAME_OVER, close both players, and reset."""
+    session.state = "GAME_OVER"
+    for pid, conn in session.players.items():
+        record = session.leaderboard.setdefault(conn.alias, {"wins": 0, "losses": 0, "draws": 0})
+        if winner is None:
+            record["draws"] += 1
+        elif pid == winner:
+            record["wins"] += 1
+        else:
+            record["losses"] += 1
+    payload = {
+        "reason": reason,
+        "winner": winner,
+        "final_hits": dict(session.hits),
+        "leaderboard": session.leaderboard,
+    }
+    broadcast(sel, session, "GAME_OVER", payload)
+    for conn in session.players.values():
+        conn.close_after_send = True
+    print(f"[SERVER] Game over ({reason}), winner: {winner}")
+    session.reset()
+
+
+def handle_place_ships(sel, conn, session, payload):
+    """Accept a manual or random fleet and start the first turn once both are placed."""
+    pid = conn.player_id
+    if session.state != "SHIP_PLACEMENT" or pid in session.placed:
+        send_error(sel, conn, "INVALID_STATE", "Ship placement is not allowed now", "PLACE_SHIPS")
+        return
+    mode = payload.get("mode")
+    if mode == "RANDOM":
+        fleet, ships = random_layout()
+    elif mode == "MANUAL":
+        ships = payload.get("ships")
+        fleet = validate_layout(ships)
+        if fleet is None:
+            send_error(sel, conn, "INVALID_PLACEMENT", "Ships overlap, leave the board, or the fleet is wrong", "PLACE_SHIPS")
+            return
+        ships = [
+            {"name": s["name"], "row": s["row"], "col": s["col"], "orientation": s["orientation"]}
+            for s in ships
+        ]
+    else:
+        send_error(sel, conn, "MALFORMED_MESSAGE", "mode must be MANUAL or RANDOM", "PLACE_SHIPS")
+        return
+    session.fleets[pid] = fleet
+    session.placed.add(pid)
+    ack = {"ships": ships, "waiting_for_opponent": len(session.placed) < 2}
+    queue_message(sel, conn, build_message("PLACEMENT_ACK", "SERVER", ack))
+    print(f"[SERVER] {pid} placed ships ({mode})")
+    if len(session.placed) == 2:
+        session.state = "PLAYER_TURN"
+        session.active_turn = "Player_1"
+        broadcast(sel, session, "STATE_UPDATE", {
+            "shooter": None,
+            "target": None,
+            "result": None,
+            "ship_sunk": None,
+            "scores": score_table(session),
+            "next_turn": session.active_turn,
+        })
+        print("[SERVER] Both fleets placed, Player_1 fires first")
+
+
+def handle_shot(sel, conn, session, payload):
+    """Validate a shot, mark the result, check for game end, and broadcast the update."""
+    pid = conn.player_id
+    if session.state != "PLAYER_TURN":
+        send_error(sel, conn, "INVALID_STATE", "Shots are not allowed now", "SHOT")
+        return
+    if pid != session.active_turn:
+        send_error(sel, conn, "NOT_YOUR_TURN", f"It is {session.active_turn}'s turn", "SHOT")
+        return
+    row, col = payload.get("row"), payload.get("col")
+    if ship_cells(row, col, 1, "H") is None:
+        send_error(sel, conn, "INVALID_SHOT", "row must be A-J and col must be 1-10", "SHOT")
+        return
+    target = opponent(pid)
+    cell = (row, col)
+    if cell in session.shots_received[target]:
+        send_error(sel, conn, "ALREADY_FIRED", f"{row}{col} was already targeted", "SHOT")
+        return
+    session.state = "EVALUATE_MOVE"
+    session.shots_received[target].add(cell)
+    session.shots_fired[pid] += 1
+    result, sunk = "MISS", None
+    for name, cells in session.fleets[target].items():
+        if cell in cells:
+            session.hits[pid] += 1
+            result = "HIT"
+            if cells <= session.shots_received[target]:
+                result, sunk = "SUNK", name
+            break
+    print(f"[SERVER] {pid} fired at {row}{col}: {result}")
+    session.state = "CHECK_WIN_DRAW"
+    if session.hits[pid] == TOTAL_SHIP_CELLS:
+        end_game(sel, session, "ALL_SHIPS_SUNK", pid)
+        return
+    if all(session.shots_fired[p] >= SHOT_LIMIT for p in PLAYER_IDS):
+        p1, p2 = session.hits["Player_1"], session.hits["Player_2"]
+        winner = "Player_1" if p1 > p2 else "Player_2" if p2 > p1 else None
+        end_game(sel, session, "SHOT_LIMIT", winner)
+        return
+    session.state = "PLAYER_TURN"
+    session.active_turn = target
+    broadcast(sel, session, "STATE_UPDATE", {
+        "shooter": pid,
+        "target": {"row": row, "col": col},
+        "result": result,
+        "ship_sunk": sunk,
+        "scores": score_table(session),
+        "next_turn": session.active_turn,
+    })
+
+
+def handle_draw_offer(sel, conn, session, payload):
+    """Relay the active player's draw offer to the opponent and pause shooting."""
+    pid = conn.player_id
+    if session.state != "PLAYER_TURN":
+        send_error(sel, conn, "INVALID_STATE", "A draw cannot be offered now", "DRAW_OFFER")
+        return
+    if pid != session.active_turn:
+        send_error(sel, conn, "NOT_YOUR_TURN", "You can only offer a draw on your turn", "DRAW_OFFER")
+        return
+    session.state = "DRAW_PENDING"
+    session.draw_offered_by = pid
+    other = session.players[opponent(pid)]
+    queue_message(sel, other, build_message("DRAW_OFFER", "SERVER", {"offered_by": pid}))
+    print(f"[SERVER] {pid} offered a draw")
+
+
+def handle_draw_response(sel, conn, session, payload):
+    """End the game as a draw if accepted, or resume play and notify the offerer."""
+    pid = conn.player_id
+    if session.state != "DRAW_PENDING" or pid == session.draw_offered_by:
+        send_error(sel, conn, "INVALID_STATE", "There is no draw offer to answer", "DRAW_RESPONSE")
+        return
+    accepted = payload.get("accepted")
+    if not isinstance(accepted, bool):
+        send_error(sel, conn, "MALFORMED_MESSAGE", "accepted must be true or false", "DRAW_RESPONSE")
+        return
+    if accepted:
+        end_game(sel, session, "DRAW", None)
+        return
+    offerer = session.players[session.draw_offered_by]
+    session.draw_offered_by = None
+    session.state = "PLAYER_TURN"
+    reply = {"accepted": False, "responded_by": pid}
+    queue_message(sel, offerer, build_message("DRAW_RESPONSE", "SERVER", reply))
+    print(f"[SERVER] {pid} denied the draw")
+
+
+def handle_disconnect(sel, conn, session, payload):
+    """Close the connection on a DISCONNECT message (forfeits an active game)."""
+    teardown(sel, conn, session)
+
+
 HANDLERS = {
     "CONNECT": handle_connect,
+    "PLACE_SHIPS": handle_place_ships,
+    "SHOT": handle_shot,
+    "DRAW_OFFER": handle_draw_offer,
+    "DRAW_RESPONSE": handle_draw_response,
+    "DISCONNECT": handle_disconnect,
 }
 
 
@@ -234,7 +489,7 @@ def main():
                     if mask & selectors.EVENT_READ:
                         handle_read(sel, conn, session)
                     if mask & selectors.EVENT_WRITE and not conn.closed:
-                        handle_write(sel, conn)
+                        handle_write(sel, conn, session)
     except KeyboardInterrupt:
         print("\n[SERVER] Shutting down")
     finally:
